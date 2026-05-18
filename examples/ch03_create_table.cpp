@@ -23,6 +23,8 @@ int main() {
         return 1;
     }
 
+    exec_sql(db, "PRAGMA foreign_keys = ON;", "开启外键检查");
+
     // 创建设备表。
     // 这张表用于保存设备基础信息，可以把它理解为“设备档案表”。
     // CREATE TABLE IF NOT EXISTS 的含义是：如果表不存在就创建，已存在则跳过，不报错。
@@ -117,6 +119,28 @@ int main() {
                 sqlite3_column_int(stmt, 3),    // 第 3 列：notnull，是否声明 NOT NULL
                 sqlite3_column_text(stmt, 4) ?
                     (const char*)sqlite3_column_text(stmt, 4) : "(无)"); // 第 4 列：dflt_value，默认值
+        }
+    }
+    sqlite3_finalize(stmt);
+
+    // 查看当前连接是否已开启外键检查。
+    printf("\n--- foreign_keys 开关状态 ---\n");
+    rc = sqlite3_prepare_v2(db, "PRAGMA foreign_keys;", -1, &stmt, nullptr);
+    if (rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+        printf("  foreign_keys = %d\n", sqlite3_column_int(stmt, 0));
+    }
+    sqlite3_finalize(stmt);
+
+    // 查看 sensor_data 表声明了哪些外键。
+    printf("\n--- sensor_data 的外键定义 ---\n");
+    rc = sqlite3_prepare_v2(db,
+        "PRAGMA foreign_key_list(sensor_data);", -1, &stmt, nullptr);
+    if (rc == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            printf("  外键: sensor_data.%s -> %s.%s\n",
+                sqlite3_column_text(stmt, 3),
+                sqlite3_column_text(stmt, 2),
+                sqlite3_column_text(stmt, 4));
         }
     }
     sqlite3_finalize(stmt);

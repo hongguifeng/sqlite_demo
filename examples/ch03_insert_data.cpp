@@ -17,6 +17,8 @@ int main() {
     sqlite3 *db = nullptr;
     sqlite3_open("insert_demo.db", &db);
 
+    exec_sql(db, "PRAGMA foreign_keys = ON;");
+
     exec_sql(db,
         "CREATE TABLE IF NOT EXISTS devices ("
         "  device_id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -103,6 +105,17 @@ int main() {
     }
     sqlite3_finalize(stmt);
     printf("已插入 %d 条传感器数据\n", (int)(sizeof(readings)/sizeof(readings[0])));
+
+    printf("\n--- 外键约束演示 ---\n");
+    sqlite3_prepare_v2(db, sql_sensor, -1, &stmt, nullptr);
+    sqlite3_bind_int(stmt, 1, 999);
+    sqlite3_bind_double(stmt, 2, 18.0);
+    sqlite3_bind_double(stmt, 3, 50.0);
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE) {
+        printf("插入不存在设备的采样数据失败: %s\n", sqlite3_errmsg(db));
+    }
+    sqlite3_finalize(stmt);
 
     // 验证
     sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM sensor_data;", -1, &stmt, nullptr);

@@ -58,6 +58,234 @@ SQLite 的类型系统与传统数据库不同，它使用**类型亲和性（Ty
 | `DEFAULT value` | 默认值 | 变量初始值 |
 | `AUTOINCREMENT` | 自动递增（仅 INTEGER PRIMARY KEY） | 自增计数器 |
 
+### 深入理解：什么是外键（Foreign Key）
+
+前面的约束大多是在限制“本表这一列自身”的取值，例如：
+
+1. 主键要求唯一。
+2. `NOT NULL` 要求不能留空。
+3. `UNIQUE` 要求不能重复。
+
+而**外键**约束处理的是另一类问题：
+
+> 当前表中的某个值，必须能在另一张表里找到对应记录。
+
+在本章示例里：
+
+```sql
+CREATE TABLE devices (
+    device_id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL
+);
+
+CREATE TABLE sensor_data (
+    id INTEGER PRIMARY KEY,
+    device_id INTEGER NOT NULL,
+    temperature REAL,
+    FOREIGN KEY (device_id) REFERENCES devices(device_id)
+);
+```
+
+这里的关系可以这样理解：
+
+1. `devices` 是**父表**，保存设备主记录。
+2. `sensor_data` 是**子表**，保存某台设备产生的采样数据。
+3. `sensor_data.device_id` 是外键，引用 `devices.device_id`。
+
+它表达的业务含义是：
+
+> 每一条传感器数据，都应该属于一台真实存在的设备。
+
+如果没有外键，就可能出现这种“脏数据”：
+
+```sql
+INSERT INTO sensor_data (device_id, temperature) VALUES (999, 25.3);
+```
+
+假设 `devices` 表里根本没有 `device_id = 999` 这台设备，那么这条采样数据就变成了“找不到归属设备的孤儿记录”。
+
+外键的作用，就是帮助数据库在结构层面阻止这种不一致。
+
+### 用嵌入式思维理解外键
+
+如果把数据库表想成 C 里的两组结构体数组：
+
+```c
+struct Device {
+    int device_id;
+    char name[64];
+};
+
+struct SensorData {
+    int id;
+    int device_id;   // 应该引用某个真实存在的 Device.device_id
+    double temperature;
+};
+```
+
+那么外键约束，本质上相当于你在要求：
+
+1. `SensorData.device_id` 不能随便填一个整数；
+2. 它必须对应 `devices[]` 数组里某个已经存在的设备 ID；
+3. 删除设备时，还要考虑有没有 `sensor_data[]` 在引用它。
+
+也就是说，外键保护的不是“单个字段格式”，而是**两张表之间的引用关系**。
+
+### 外键到底能帮你防住什么问题
+
+把外键打开后，数据库通常会帮你检查两类典型错误。
+
+#### 1. 插入或更新子表时，引用了不存在的父表记录
+
+例如：
+
+```sql
+INSERT INTO sensor_data (device_id, temperature) VALUES (999, 25.3);
+```
+
+如果 `devices` 里不存在 `device_id = 999`，那么这条插入应当失败。
+
+同理，下面这种更新也可能失败：
+
+```sql
+UPDATE sensor_data SET device_id = 999 WHERE id = 1;
+```
+
+因为它把原本合法的引用，改成了一个不存在的设备。
+
+#### 2. 删除或修改父表时，破坏了子表的引用关系
+
+例如：
+
+```sql
+DELETE FROM devices WHERE device_id = 1;
+```
+
+如果 `sensor_data` 里还有很多记录的 `device_id = 1`，那么数据库需要决定怎么处理这些子表记录。常见策略包括：
+
+1. 直接拒绝删除。
+2. 连同相关传感器数据一起删除。
+3. 把子表里的外键列置为 `NULL`。
+
+这部分行为由 `ON DELETE` / `ON UPDATE` 子句决定，后面会继续解释。
+
+### 外键语法怎么读
+
+最基本的写法是：
+
+```sql
+FOREIGN KEY (子表列) REFERENCES 父表(被引用列)
+```
+
+套到本章示例就是：
+
+```sql
+FOREIGN KEY (device_id) REFERENCES devices(device_id)
+```
+
+可以按下面的顺序去理解：
+
+1. 子表当前这一列是 `device_id`。
+2. 它引用的是 `devices` 表。
+3. 引用目标列是 `devices.device_id`。
+
+这通常要求被引用列是主键，或者至少具有唯一性。
+
+### SQLite 中一个非常重要的细节：外键默认可能并不会自动生效
+
+这是很多初学者最容易踩坑的地方。
+
+在 SQLite 中，**写了 `FOREIGN KEY (...) REFERENCES ...` 并不等于当前连接一定会执行外键检查**。默认情况下，外键约束是否生效，取决于连接是否开启了外键支持。
+
+最常见的开启方式是：
+
+```cpp
+sqlite3 *db = nullptr;
+sqlite3_open("demo.db", &db);
+sqlite3_exec(db, "PRAGMA foreign_keys = ON;", nullptr, nullptr, nullptr);
+```
+
+也可以查询当前连接是否已经开启：
+
+```sql
+PRAGMA foreign_keys;
+```
+
+返回值通常为：
+
+1. `1`：已开启。
+2. `0`：未开启。
+
+这里要特别记住两个要点：
+
+1. **这是按连接生效的设置**，不是“给数据库文件开一次就永久开启”。
+2. 你通常应该在 `sqlite3_open()` 之后、执行建表和增删改查之前立即打开它。
+
+所以，本章里虽然在表结构中声明了外键，但前面的几个 CRUD 示例主要是讲 API 用法，并没有专门演示外键报错场景。如果你希望自己的程序真正依赖外键约束，就要在连接建立后显式执行：
+
+```cpp
+exec_sql(db, "PRAGMA foreign_keys = ON;", "开启外键检查");
+```
+
+### 一个最小示例：打开外键后会发生什么
+
+```sql
+CREATE TABLE devices (
+    device_id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL
+);
+
+CREATE TABLE sensor_data (
+    id INTEGER PRIMARY KEY,
+    device_id INTEGER NOT NULL,
+    temperature REAL,
+    FOREIGN KEY (device_id) REFERENCES devices(device_id)
+);
+
+INSERT INTO devices (device_id, name) VALUES (1, '温度传感器A');
+
+-- 合法：父表里存在 device_id = 1
+INSERT INTO sensor_data (device_id, temperature) VALUES (1, 25.3);
+
+-- 非法：父表里不存在 device_id = 999
+INSERT INTO sensor_data (device_id, temperature) VALUES (999, 18.0);
+```
+
+如果外键检查已开启，最后一条语句通常会失败，并返回类似“foreign key constraint failed”的错误。
+
+这正是外键的价值：
+
+> 它把“数据关系是否一致”的检查，从应用代码里的一堆手工判断，前移到了数据库约束层。
+
+### `ON DELETE` / `ON UPDATE` 是什么
+
+只声明 `REFERENCES` 还不够，很多时候你还需要定义：当父表记录被删除或主键被修改时，子表应该怎么办。
+
+例如：
+
+```sql
+FOREIGN KEY (device_id)
+    REFERENCES devices(device_id)
+    ON DELETE CASCADE
+    ON UPDATE CASCADE
+```
+
+常见动作如下：
+
+| 子句 | 含义 | 典型场景 |
+|------|------|---------|
+| `NO ACTION` / `RESTRICT` | 拒绝本次删除或更新 | 希望强制先清理子表数据 |
+| `CASCADE` | 父表变更同步传播到子表 | 父子记录生命周期强绑定 |
+| `SET NULL` | 把子表外键列置空 | 子记录允许“暂时失去归属” |
+| `SET DEFAULT` | 子表外键列改为默认值 | 设计了默认归属目标 |
+
+对本章的设备-采样数据模型来说，最常见的两种设计是：
+
+1. `ON DELETE RESTRICT`：设备还有采样数据时，不允许删设备。
+2. `ON DELETE CASCADE`：删设备时，相关采样数据也一起删掉。
+
+选哪一种，不是 SQL 语法问题，而是业务规则问题。
+
 ### 示例代码
 
 文件：`examples/ch03_create_table.cpp`
@@ -88,6 +316,8 @@ int main() {
         sqlite3_close(db);
         return 1;
     }
+
+    exec_sql(db, "PRAGMA foreign_keys = ON;", "开启外键检查");
 
     // 1. 创建设备表
     const char *sql_create_devices =
@@ -141,6 +371,28 @@ int main() {
     }
     sqlite3_finalize(stmt);
 
+    // 5. 查看当前连接是否已开启外键检查
+    printf("\n--- foreign_keys 开关状态 ---\n");
+    rc = sqlite3_prepare_v2(db, "PRAGMA foreign_keys;", -1, &stmt, nullptr);
+    if (rc == SQLITE_OK && sqlite3_step(stmt) == SQLITE_ROW) {
+        printf("  foreign_keys = %d\n", sqlite3_column_int(stmt, 0));
+    }
+    sqlite3_finalize(stmt);
+
+    // 6. 查看 sensor_data 表的外键定义
+    printf("\n--- sensor_data 的外键定义 ---\n");
+    rc = sqlite3_prepare_v2(db,
+        "PRAGMA foreign_key_list(sensor_data);", -1, &stmt, nullptr);
+    if (rc == SQLITE_OK) {
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            printf("  外键: sensor_data.%s -> %s.%s\n",
+                sqlite3_column_text(stmt, 3),
+                sqlite3_column_text(stmt, 2),
+                sqlite3_column_text(stmt, 4));
+        }
+    }
+    sqlite3_finalize(stmt);
+
     sqlite3_close(db);
     remove("create_table_demo.db");
     printf("\n示例完成。\n");
@@ -154,6 +406,9 @@ int main() {
 2. **`IF NOT EXISTS`**：防止重复创建表时报错
 3. **`sqlite_master`**：SQLite 内部的系统表，记录了数据库中所有的表、索引、视图、触发器等对象定义
 4. **`PRAGMA table_info()`**：查看表结构的特殊命令，可返回每一列的元数据
+5. **`PRAGMA foreign_keys`**：查看当前连接是否开启了外键检查
+6. **`PRAGMA foreign_key_list(表名)`**：查看某张表声明了哪些外键关系
+7. **外键声明只定义关系，不代表当前连接一定开启了外键检查**；在真实项目中应尽早执行 `PRAGMA foreign_keys = ON;`
 
 ### 深入理解：`sqlite_master`
 
@@ -314,6 +569,8 @@ int main() {
     sqlite3 *db = nullptr;
     sqlite3_open("insert_demo.db", &db);
 
+    exec_sql(db, "PRAGMA foreign_keys = ON;");
+
     // 创建表
     exec_sql(db,
         "CREATE TABLE IF NOT EXISTS devices ("
@@ -412,6 +669,18 @@ int main() {
     sqlite3_finalize(stmt);
     printf("已插入 %d 条传感器数据\n", (int)(sizeof(readings)/sizeof(readings[0])));
 
+    // 演示外键约束：插入一条引用不存在设备的采样数据
+    printf("\n--- 外键约束演示 ---\n");
+    sqlite3_prepare_v2(db, sql_sensor, -1, &stmt, nullptr);
+    sqlite3_bind_int(stmt, 1, 999);
+    sqlite3_bind_double(stmt, 2, 18.0);
+    sqlite3_bind_double(stmt, 3, 50.0);
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE) {
+        printf("插入不存在设备的采样数据失败: %s\n", sqlite3_errmsg(db));
+    }
+    sqlite3_finalize(stmt);
+
     // 验证：查询总数
     sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM sensor_data;", -1, &stmt, nullptr);
     if (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -425,6 +694,8 @@ int main() {
     return 0;
 }
 ```
+
+这个示例现在会额外演示一件很关键的事：当 `PRAGMA foreign_keys = ON;` 已开启时，往 `sensor_data` 里插入 `device_id = 999` 这种“父表中不存在的设备”会失败，并返回外键约束错误。这样读者不只看到外键的定义，还能直接看到它在运行时如何拦住脏数据。
 
 ### 绑定函数一览
 
@@ -1721,19 +1992,46 @@ UPDATE devices SET ip_address = NULL WHERE device_id = 1;
 FOREIGN KEY (device_id) REFERENCES devices(device_id)
 ```
 
-这意味着 `sensor_data` 的记录依赖于 `devices` 中的设备主键。
+这意味着 `sensor_data` 的记录依赖于 `devices` 中的设备主键。换句话说，`devices` 是父表，`sensor_data` 是子表，后者不能脱离前者独立成立。
 
 在更完整的数据库设计里，这会带来一个重要问题：
 
 > 如果某个设备还有相关传感器数据，是否允许直接删除这台设备？
 
-答案取决于外键是否开启、以及外键约束的具体配置。例如：
+答案取决于两件事：
+
+1. 当前 SQLite 连接是否真的开启了外键检查。
+2. 这条外键定义是否额外配置了 `ON DELETE` 策略。
+
+如果外键检查没有开启，那么即使表结构里写了 `FOREIGN KEY`，SQLite 也可能允许你删掉父表记录，最终留下“子表还在、父表没了”的不一致数据。
+
+如果外键检查已经开启，那么行为通常由外键策略决定。例如：
 
 1. 有的设计会禁止删除被引用的父表记录；
 2. 有的设计会在删除父表记录时级联删除子表记录；
 3. 有的设计会把子表引用字段置空。
 
-本章示例主要聚焦 CRUD 基本语法，没有展开外键删除策略，但在真实项目里这是必须考虑的点。
+例如下面这条定义：
+
+```sql
+FOREIGN KEY (device_id) REFERENCES devices(device_id) ON DELETE CASCADE
+```
+
+它的含义就是：删除某台设备时，引用这台设备的 `sensor_data` 记录也一起删除。
+
+而如果你写的是：
+
+```sql
+FOREIGN KEY (device_id) REFERENCES devices(device_id) ON DELETE RESTRICT
+```
+
+那么当这台设备仍然被传感器数据引用时，删除操作会直接失败。
+
+所以在真实项目里，删除父表记录之前，必须先回答一个业务问题：
+
+> 这条父记录被删掉后，依赖它的子记录应该被拒绝、级联删除，还是改成空引用？
+
+本章示例主要聚焦 CRUD 基本语法，没有在代码里完整展开外键删除策略，但你现在应该把它当成表设计的一部分，而不是“删除时报错了再临时处理”。
 
 ### 深入理解：更新和删除后的验证为什么很重要
 
@@ -1776,6 +2074,7 @@ FOREIGN KEY (device_id) REFERENCES devices(device_id)
 - 涉及外部输入的 SQL，**必须使用参数绑定**，不要拼接字符串
 - 使用 `sqlite3_reset()` 可以复用已编译的语句
 - `UPDATE` 和 `DELETE` **务必带 WHERE 子句**，否则影响所有行
+- 在 SQLite 中声明了外键后，若要真正执行外键约束检查，通常还需要在每个连接上显式开启 `PRAGMA foreign_keys = ON;`
 
 ### 一张图看懂本章：SQLite C API 的统一工作流
 
